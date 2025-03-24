@@ -136,8 +136,8 @@ async def create_tables():
 async def generate_test_data():
     async with SessionLocal() as session:
         total_records = 500_000
-        product_ids = list(range(1, 11))
-        warehouse_ids = list(range(1, 11))
+        product_ids = list(range(1, 6))
+        warehouse_ids = list(range(1, 6))
 
         start_time = time.time()
 
@@ -161,8 +161,8 @@ async def generate_test_data():
 async def generate_test_data2():
     async with SessionLocal() as session:
         total_records = 500_000
-        product_ids = list(range(6, 11))
-        warehouse_ids = list(range(6, 11))
+        product_ids = list(range(1, 11))
+        warehouse_ids = list(range(1, 11))
 
         start_time = time.time()
 

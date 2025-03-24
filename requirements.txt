@@ -3,3 +3,4 @@ fastapi~=0.115.8
 Faker~=26.0.0
 tqdm~=4.67.1
 asyncpg
+uvicorn

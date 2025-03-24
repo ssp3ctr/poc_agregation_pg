@@ -1,11 +1,9 @@
 import asyncio
-import asyncpg
 import random
-import json
 import time
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy import Column, Integer, TIMESTAMP, String, text, insert
+from sqlalchemy import Column, Integer, TIMESTAMP, String, text
 from sqlalchemy.future import select
 from faker import Faker
 from tqdm import tqdm
@@ -50,26 +48,43 @@ async def create_tables():
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
 
-        # Одна функция-триггер: обновляет и остатки, и статус
+        # Функция для обновления остатков
         await conn.execute(text("""
-            CREATE OR REPLACE FUNCTION update_stock_and_status() RETURNS TRIGGER AS $$
-            DECLARE
-                total_balance INTEGER;
-                new_status TEXT;
+            CREATE OR REPLACE FUNCTION update_stock_balance() RETURNS TRIGGER AS $$
             BEGIN
-                -- Обновляем остатки
                 INSERT INTO stock_balance (product_id, warehouse_id, stock_balance)
                 VALUES (NEW.product_id, NEW.warehouse_id, NEW.quantity)
                 ON CONFLICT (product_id, warehouse_id) 
                 DO UPDATE SET stock_balance = stock_balance.stock_balance + EXCLUDED.stock_balance;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql;
+        """))
 
-                -- Считаем общий остаток по товару
+        # Триггер для обновления остатков
+        await conn.execute(text("""
+            CREATE TRIGGER stock_update_trigger
+            AFTER INSERT ON warehouse_operations
+            FOR EACH ROW
+            EXECUTE FUNCTION update_stock_balance();
+        """))
+
+
+        # Функция для обновления статуса
+        await conn.execute(text("""
+            CREATE OR REPLACE FUNCTION public.update_product_status()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $function$
+            DECLARE
+                total_balance INTEGER;
+                new_status TEXT;
+            BEGIN
                 SELECT SUM(stock_balance)
                 INTO total_balance
                 FROM stock_balance
                 WHERE product_id = NEW.product_id;
-
-                -- Вычисляем статус
+            
                 IF total_balance IS NULL OR total_balance <= 0 THEN
                     new_status := 'Закончился';
                 ELSIF total_balance < 10 THEN
@@ -77,96 +92,39 @@ async def create_tables():
                 ELSE
                     new_status := 'Доступен';
                 END IF;
-
-                -- Вставляем/обновляем статус, только если изменился
-                INSERT INTO products_status (product_id, warehouse_id, status)
-                VALUES (NEW.product_id, NEW.warehouse_id, new_status)
-                ON CONFLICT (product_id, warehouse_id) DO UPDATE
+            
+                -- Вставляем или обновляем, но обновляем только если статус изменился
+                INSERT INTO products_status (product_id, status)
+                VALUES (NEW.product_id, new_status)
+                ON CONFLICT (product_id) DO UPDATE
                 SET status = EXCLUDED.status
                 WHERE products_status.status IS DISTINCT FROM EXCLUDED.status;
-
+            
                 RETURN NEW;
             END;
-            $$ LANGUAGE plpgsql;
+            $function$;
         """))
 
-        # Один триггер на вставку в warehouse_operations
+        # Триггер для обновления статуса товара
         await conn.execute(text("""
-            CREATE TRIGGER trg_update_stock_and_status
+            CREATE TRIGGER products_status_trigger
             AFTER INSERT ON warehouse_operations
             FOR EACH ROW
-            EXECUTE FUNCTION update_stock_and_status();
+            EXECUTE FUNCTION update_products_status();
         """))
 
-        await conn.execute(text("""
-            CREATE OR REPLACE FUNCTION notify_status_change() RETURNS TRIGGER AS $$
-            DECLARE
-                payload TEXT;
-            BEGIN
-                IF NEW.status IS DISTINCT FROM OLD.status THEN
-                    payload := json_build_object(
-                        'product_id', NEW.product_id,
-                        'warehouse_id', NEW.warehouse_id,
-                        'old_status', OLD.status,
-                        'new_status', NEW.status
-                    )::text;
-    
-                    PERFORM pg_notify('status_channel', payload);
-                END IF;
-                RETURN NEW;
-            END;
-            $$ LANGUAGE plpgsql;
-        """))
-
-        await conn.execute(text("""
-            DROP TRIGGER IF EXISTS trg_notify_status_change ON products_status;
-        """))
-
-        await conn.execute(text("""
-            CREATE TRIGGER trg_notify_status_change
-            AFTER UPDATE ON products_status
-            FOR EACH ROW
-            WHEN (OLD.status IS DISTINCT FROM NEW.status)
-            EXECUTE FUNCTION notify_status_change();
-        """))
-
-    print("✅ Таблицы и триггер созданы!")
+    print("✅ Таблицы и триггеры созданы!")
 
 
 async def generate_test_data():
     async with SessionLocal() as session:
-        total_records = 500_000
+        total_records = 1_000_000
         product_ids = list(range(1, 11))
         warehouse_ids = list(range(1, 11))
 
         start_time = time.time()
 
-        batch_size = 1_000
-        for _ in tqdm(range(total_records // batch_size), desc="📦 Генерация данных"):
-            values = [
-                {
-                    "product_id": random.choice(product_ids),
-                    "warehouse_id": random.choice(warehouse_ids),
-                    "quantity": random.randint(-5, 5),
-                }
-                for _ in range(batch_size)
-            ]
-            await session.execute(insert(WarehouseOperations), values)
-            await session.commit()
-
-        end_time = time.time()
-        print(f"✅ Данные insert загружены за {end_time - start_time:.2f} секунд")
-
-
-async def generate_test_data2():
-    async with SessionLocal() as session:
-        total_records = 500_000
-        product_ids = list(range(6, 11))
-        warehouse_ids = list(range(6, 11))
-
-        start_time = time.time()
-
-        batch_size = 1_000
+        batch_size = 5_000
         for _ in tqdm(range(total_records // batch_size), desc="📦 Генерация данных"):
             batch = [
                 WarehouseOperations(
@@ -180,7 +138,7 @@ async def generate_test_data2():
             await session.commit()
 
         end_time = time.time()
-        print(f"✅ Данные add_all загружены за {end_time - start_time:.2f} секунд")
+        print(f"✅ Данные загружены за {end_time - start_time:.2f} секунд")
 
 
 async def check_stock_balances():
@@ -199,12 +157,8 @@ async def check_stock_balances():
 
 async def main():
     await create_tables()
-
-    await generate_test_data2()
+    await generate_test_data()
     await check_stock_balances()
-
-    #await generate_test_data()
-    #await check_stock_balances()
 
 
 if __name__ == "__main__":
