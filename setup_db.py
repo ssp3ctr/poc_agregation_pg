@@ -10,6 +10,8 @@ from sqlalchemy.future import select
 from faker import Faker
 from tqdm import tqdm
 import os
+from asyncpg.exceptions import PostgresError, DeadlockDetectedError
+import random as rnd
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://user:password@db:5432/warehouse_db")
 
@@ -37,12 +39,19 @@ class StockBalance(Base):
     stock_balance = Column(Integer, default=0)
 
 
-class Products_Status(Base):
+class ProductsStatus(Base):
     __tablename__ = "products_status"
 
     product_id = Column(Integer, primary_key=True)
     warehouse_id = Column(Integer, primary_key=True)
     status = Column(String, default=0)
+
+
+class StatusChangeCounter(Base):
+    __tablename__ = "status_change_counter"
+
+    id = Column(Integer, primary_key=True, default=1)
+    count = Column(Integer, default=0)
 
 
 async def create_tables():
@@ -67,7 +76,7 @@ async def create_tables():
                 SELECT SUM(stock_balance)
                 INTO total_balance
                 FROM stock_balance
-                WHERE product_id = NEW.product_id;
+                WHERE product_id = NEW.product_id AND warehouse_id = NEW.warehouse_id;
 
                 -- Вычисляем статус
                 IF total_balance IS NULL OR total_balance <= 0 THEN
@@ -110,8 +119,14 @@ async def create_tables():
                         'old_status', OLD.status,
                         'new_status', NEW.status
                     )::text;
-    
+            
+                    -- Отправляем уведомление
                     PERFORM pg_notify('status_channel', payload);
+            
+                    -- ✅ Увеличиваем счётчик
+                    UPDATE status_change_counter
+                    SET count = count + 1
+                    WHERE id = 1;
                 END IF;
                 RETURN NEW;
             END;
@@ -130,6 +145,12 @@ async def create_tables():
             EXECUTE FUNCTION notify_status_change();
         """))
 
+        await conn.execute(text("""
+            INSERT INTO status_change_counter (id, count)
+            VALUES (1, 0)
+            ON CONFLICT (id) DO NOTHING;
+        """))
+
     print("✅ Таблицы и триггер созданы!")
 
 
@@ -140,8 +161,8 @@ async def generate_test_data():
         warehouse_ids = list(range(1, 11))
 
         start_time = time.time()
+        batch_size = 5_000
 
-        batch_size = 1_000
         for _ in tqdm(range(total_records // batch_size), desc="📦 Генерация данных"):
             values = [
                 {
@@ -151,8 +172,22 @@ async def generate_test_data():
                 }
                 for _ in range(batch_size)
             ]
-            await session.execute(insert(WarehouseOperations), values)
-            await session.commit()
+            values.sort(key=lambda x: (x['product_id'], x['warehouse_id']))
+
+            for attempt in range(3):
+                try:
+                    await session.execute(text("SET LOCAL lock_timeout = '2000ms'"))
+                    await session.execute(insert(WarehouseOperations), values)
+                    await session.commit()
+                    break  # успешно — выходим из цикла retry
+                except (DeadlockDetectedError, PostgresError) as e:
+                    await session.rollback()
+                    print(f"⛔ Блокировка (попытка {attempt + 1}/3): {e}")
+                    await asyncio.sleep(rnd.uniform(0.1, 0.3))  # подождать и попробовать снова
+                except Exception as e:
+                    await session.rollback()
+                    print(f"❌ Неизвестная ошибка: {e}")
+                    break  # не retry, если ошибка другая
 
         end_time = time.time()
         print(f"✅ Данные insert загружены за {end_time - start_time:.2f} секунд")
@@ -166,7 +201,7 @@ async def generate_test_data2():
 
         start_time = time.time()
 
-        batch_size = 1_000
+        batch_size = 5_000
         for _ in tqdm(range(total_records // batch_size), desc="📦 Генерация данных"):
             batch = [
                 WarehouseOperations(
@@ -176,8 +211,23 @@ async def generate_test_data2():
                 )
                 for _ in range(batch_size)
             ]
-            session.add_all(batch)
-            await session.commit()
+
+            batch.sort(key=lambda x: (x.product_id, x.warehouse_id))
+
+            for attempt in range(3):
+                try:
+                    await session.execute(text("SET LOCAL lock_timeout = '2000ms'"))
+                    session.add_all(batch)  # ✅ УБРАН await
+                    await session.commit()
+                    break
+                except (DeadlockDetectedError, PostgresError) as e:
+                    await session.rollback()
+                    print(f"⛔ Блокировка (попытка {attempt + 1}/3): {e}")
+                    await asyncio.sleep(rnd.uniform(0.1, 0.3))
+                except Exception as e:
+                    await session.rollback()
+                    print(f"❌ Неизвестная ошибка: {e}")
+                    break
 
         end_time = time.time()
         print(f"✅ Данные add_all загружены за {end_time - start_time:.2f} секунд")
@@ -200,11 +250,13 @@ async def check_stock_balances():
 async def main():
     await create_tables()
 
-    await generate_test_data2()
-    await check_stock_balances()
-
-    #await generate_test_data()
+    # add_all
+    #await generate_test_data2()
     #await check_stock_balances()
+
+    # insert
+    await generate_test_data()
+    await check_stock_balances()
 
 
 if __name__ == "__main__":
