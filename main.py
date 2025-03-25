@@ -20,6 +20,23 @@ status_listener_connection: asyncpg.Connection | None = None
 listener_task: asyncio.Task | None = None
 
 
+async def _keep_alive():
+    while True:
+        await asyncio.sleep(3600)
+
+
+async def handle_status_notification(payload: str):
+    data = json.loads(payload)
+    print(
+        f"🔔 Статус изменился: товар {data['product_id']} "
+        f"(склад {data['warehouse_id']}): "
+        f"{data['old_status']} → {data['new_status']}")
+
+
+def notification_callback(connection, pid, channel, payload):
+    asyncio.create_task(handle_status_notification(payload))
+
+
 @app.get("/balances", response_model=list[StockBalanceSchema])
 async def read_all_balances(db: AsyncSession = Depends(get_db)):
     return await get_all_balances(db)
@@ -44,15 +61,6 @@ async def read_balance_by_warehouse(warehouse_id: int, db: AsyncSession = Depend
 async def read_balance_by_product_and_warehouse(product_id: int, warehouse_id: int, db: AsyncSession = Depends(get_db)):
     balance = await get_balance_by_product_and_warehouse(db, product_id, warehouse_id)
     return {"product_id": product_id, "warehouse_id": warehouse_id, "stock_balance": balance.stock_balance if balance else 0}
-
-
-async def handle_status_notification(payload: str):
-    data = json.loads(payload)
-    print(f"🔔 Статус изменился: товар {data['product_id']} (склад {data['warehouse_id']}): {data['old_status']} → {data['new_status']}")
-
-
-def notification_callback(connection, pid, channel, payload):
-    asyncio.create_task(handle_status_notification(payload))
 
 
 @app.on_event("startup")
@@ -81,6 +89,3 @@ async def on_shutdown():
         print("❌ Слушатель отключён.")
 
 
-async def _keep_alive():
-    while True:
-        await asyncio.sleep(3600)
