@@ -1,6 +1,6 @@
 from sqlalchemy.future import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models import StockBalance
+from app.models import StockBalance, StatusChangeCount
 
 
 async def get_all_balances(db: AsyncSession):
@@ -24,5 +24,12 @@ async def get_balance_by_product_and_warehouse(db: AsyncSession, product_id: int
             StockBalance.product_id == product_id,
             StockBalance.warehouse_id == warehouse_id
         )
+    )
+    return result.scalars().first()
+
+
+async def get_states_change_count(db: AsyncSession):
+    result = await db.execute(
+        select(StatusChangeCount)
     )
     return result.scalars().first()

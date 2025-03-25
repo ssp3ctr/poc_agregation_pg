@@ -217,7 +217,7 @@ async def generate_test_data2():
             for attempt in range(3):
                 try:
                     await session.execute(text("SET LOCAL lock_timeout = '2000ms'"))
-                    session.add_all(batch)  # ✅ УБРАН await
+                    session.add_all(batch)
                     await session.commit()
                     break
                 except (DeadlockDetectedError, PostgresError) as e:
